@@ -1,185 +1,164 @@
 import streamlit as st
+import os
+import json
 from openai import OpenAI
-import PyPDF2
-import io
-import base64
+from dotenv import load_dotenv
 
-# 設定網頁標題
-st.set_page_config(page_title="My Custom ChatGPT", layout="wide")
+# Import custom modules
+from memory_manager import load_memory, save_memory, load_chat_history, save_chat_history
+from utils import process_file
+from tools import tools_definition, available_functions
 
-# 初始化 OpenAI 客戶端
-client = OpenAI()
+st.set_page_config(page_title="My Custom ChatGPT v2", layout="wide")
+load_dotenv()
+client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
-# 初始化 Session State
-if "chat_sessions" not in st.session_state:
-    st.session_state.chat_sessions = {"Default": []}
-if "current_session" not in st.session_state:
-    st.session_state.current_session = "Default"
+# --- 1. Initialization ---
 if "user_memories" not in st.session_state:
-    st.session_state.user_memories = []
-if "selected_tone" not in st.session_state:
-    st.session_state.selected_tone = "標準"
+    st.session_state.user_memories = load_memory()
+if "chat_sessions" not in st.session_state:
+    st.session_state.chat_sessions = load_chat_history()
+if "current_session" not in st.session_state:
+    st.session_state.current_session = list(st.session_state.chat_sessions.keys())[0]
 
-# 語氣定義
-tone_options = {
-    "標準": "請用中性、專業的語氣回答。",
-    "幽默": "請用風趣、幽默的語氣回答，讓對話更有趣。",
-    "簡潔": "請用極度簡潔的方式回答，直接切入重點，不要有冗詞贅句。",
-    "溫柔": "請用溫柔、體貼且充滿鼓勵的口吻回答。",
-    "嚴謹": "請用學術、嚴謹且邏輯縝密的語氣回答。"
-}
-
-# 定義使用者記憶對話框
-@st.dialog("使用者記憶管理")
-def manage_memories():
-    st.write("在這裡儲存關於您的資訊，模型將會在後續對話中參考。")
-    
-    # 語氣選擇
-    st.session_state.selected_tone = st.selectbox(
-        "選擇預設語氣",
-        options=list(tone_options.keys()),
-        index=list(tone_options.keys()).index(st.session_state.selected_tone)
-    )
-    
-    # 新增記憶
-    new_memory = st.text_input("新增記憶條目 (例如：我是一名學生)", key="new_mem_input")
-    if st.button("儲存新記憶"):
-        if new_memory and new_memory not in st.session_state.user_memories:
-            st.session_state.user_memories.append(new_memory)
-            st.rerun()
-    
-    st.divider()
-    
-    # 顯示與刪除記憶
-    if st.session_state.user_memories:
-        st.write("目前的記憶列表：")
-        for i, m in enumerate(st.session_state.user_memories):
-            col1, col2 = st.columns([0.8, 0.2])
-            col1.text(f"- {m}")
-            if col2.button("刪除", key=f"del_mem_{i}"):
-                st.session_state.user_memories.pop(i)
-                st.rerun()
-    
-    if st.button("關閉"):
-        st.rerun()
-
-# 側邊欄：對話設定
+# --- 2. Sidebar: Configuration & Tools ---
 with st.sidebar:
-    st.title("對話設定")
-    
-    # 1. 記憶管理入口
-    if st.button("開啟使用者記憶設定"):
-        manage_memories()
-    
-    st.divider()
-    
-    # 2. 對話管理
-    new_session_name = st.text_input("新增對話名稱", key="new_session_input")
-    if st.button("新增對話"):
-        if new_session_name and new_session_name not in st.session_state.chat_sessions:
-            st.session_state.chat_sessions[new_session_name] = []
-            st.session_state.current_session = new_session_name
-    
-    session_list = list(st.session_state.chat_sessions.keys())
-    st.session_state.current_session = st.selectbox(
-        "選擇對話", 
-        session_list, 
-        index=session_list.index(st.session_state.current_session)
-    )
-
-    st.divider()
-
-    # 3. 模型與參數
-    model_option = st.selectbox(
-        "選擇模型",
-        ["gpt-5-nano", "gpt-4o-mini", "gpt-4.1-nano"]
-    )
-    
-    system_prompt_base = st.text_area("基礎 System Prompt", value="你是一個專業的助手")
-    temperature = st.slider("Temperature", 0.0, 2.0, 0.7, 0.1)
-
-    if st.button("清除當前對話歷史"):
-        st.session_state.chat_sessions[st.session_state.current_session] = []
+    st.title("Session Management")
+    if st.button("+ New Chat"):
+        new_id = f"Session {len(st.session_state.chat_sessions) + 1}"
+        st.session_state.chat_sessions[new_id] = []
+        st.session_state.current_session = new_id
+        save_chat_history(st.session_state.chat_sessions)
         st.rerun()
 
-# 檔案處理函數
-def process_file(uploaded_file):
-    if uploaded_file is not None:
-        file_type = uploaded_file.type
-        if "image" in file_type:
-            base64_image = base64.b64encode(uploaded_file.read()).decode('utf-8')
-            return {"type": "image_url", "image_url": {"url": f"data:{file_type};base64,{base64_image}"}}
-        elif file_type == "application/pdf":
-            pdf_reader = PyPDF2.PdfReader(uploaded_file)
-            text = "".join([page.extract_text() for page in pdf_reader.pages])
-            return {"type": "text", "text": f"[PDF 檔案內容]:\n{text}"}
-    return None
+    st.session_state.current_session = st.selectbox(
+        "Switch Session", options=list(st.session_state.chat_sessions.keys()),
+        index=list(st.session_state.chat_sessions.keys()).index(st.session_state.current_session)
+    )
 
-# 主畫面
-st.title(f"當前對話: {st.session_state.current_session}")
-
-current_messages = st.session_state.chat_sessions[st.session_state.current_session]
-
-# 顯示歷史紀錄
-for msg in current_messages:
-    with st.chat_message(msg["role"]):
-        if isinstance(msg["content"], list):
-            for item in msg["content"]:
-                if item["type"] == "text":
-                    st.markdown(item["text"])
-                elif item["type"] == "image_url":
-                    st.image(item["image_url"]["url"])
-        else:
-            st.markdown(msg["content"])
-
-uploaded_file = st.file_uploader("上傳照片或 PDF", type=["png", "jpg", "jpeg", "pdf"])
-
-if prompt := st.chat_input("請輸入訊息"):
-    content_list = [{"type": "text", "text": prompt}]
-    file_data = process_file(uploaded_file)
-    if file_data:
-        content_list.append(file_data)
-
-    current_messages.append({"role": "user", "content": content_list})
+    st.divider()
+    st.title("MCP Tool Control")
+    tool_choice = st.selectbox(
+        "Tool Selection Mode",
+        ["auto", "none", "get_weather", "search_papers", "fetch_web_content", "analyze_csv"]
+    )
     
-    with st.chat_message("user"):
-        st.markdown(prompt)
-        if uploaded_file:
-            st.write(f"已附加檔案: {uploaded_file.name}")
+    routing_mode = st.toggle("Auto Routing", value=True)
+    manual_model = st.selectbox("Model Selector", ["gpt-4o", "gpt-4o-mini", "gpt-3.5-turbo"])
+    
+    uploaded_file = st.file_uploader("Upload PDF/Image/CSV", type=["pdf", "png", "jpg", "csv"])
+    if uploaded_file and uploaded_file.name.endswith(".csv"):
+        with open("temp_data.csv", "wb") as f:
+            f.write(uploaded_file.getbuffer())
+        st.success("File temp_data.csv is ready for analysis.")
 
+    st.divider()
+    st.title("⚙️ System Configuration")
+    
+    # Custom System Prompt Functionality
+    custom_system_prompt = st.text_area(
+        "System Instruction",
+        value="You are a professional assistant. You must use tools to retrieve real-time data when asked about weather, papers, or web content.",
+        help="This instruction defines the AI's persona and core rules."
+    )
+
+    # API Parameter Tuning
+    st.subheader("Model Parameters")
+    temperature = st.slider("Temperature", 0.0, 2.0, 0.7, 0.1)
+    max_tokens = st.number_input("Max Output Tokens", 100, 4000, 1000)
+
+# --- 3. Render Chat History ---
+messages = st.session_state.chat_sessions[st.session_state.current_session]
+for msg in messages:
+    with st.chat_message(msg["role"]):
+        if "model" in msg: st.caption(f"Model: {msg['model']}")
+        if isinstance(msg["content"], str):
+            st.markdown(msg["content"])
+        else:
+            st.markdown("[Multimodal Content]")
+
+# --- 4. Chat Logic ---
+if prompt := st.chat_input():
+    # A. Model Routing Logic
+    if routing_mode:
+        if any(k in prompt.lower() for k in ["code", "analyze", "image", "pdf", "debug", "architect"]):
+            selected_model = "gpt-4o"
+        else:
+            selected_model = "gpt-4o-mini"
+    else:
+        selected_model = manual_model
+
+    # B. User Content Construction
+    user_content = [{"type": "text", "text": prompt}]
+    if uploaded_file:
+        data = process_file(uploaded_file)
+        if isinstance(data, dict): 
+            user_content.append(data)
+            selected_model = "gpt-4o-mini"
+        elif data: user_content[0]["text"] += f"\n\n[File Content]: {data}"
+
+    # Simplify format for Tool Call optimization if it's text-only
+    final_user_msg = prompt if len(user_content) == 1 and not uploaded_file else user_content
+    messages.append({"role": "user", "content": final_user_msg})
+    st.chat_message("user").markdown(prompt)
+
+    # C. Assistant Response Generation
     with st.chat_message("assistant"):
-        message_placeholder = st.empty()
-        full_response = ""
+        mem_list = st.session_state.user_memories
+        mem_str = "\n".join(mem_list) if mem_list else "No prior memories."
         
-        # 動態組合記憶與語氣進入 System Prompt
-        memories_text = "\n".join([f"- {m}" for m in st.session_state.user_memories])
-        final_system_content = f"""{system_prompt_base}
-
-使用者長期記憶：
-{memories_text if memories_text else "無特定記憶"}
-
-指定語氣：
-{tone_options[st.session_state.selected_tone]}
-"""
+        # Construct full API message list with custom System Prompt
+        full_sys_prompt = f"{custom_system_prompt}\n\nLong-term Memory:\n{mem_str}"
+        api_messages = [{"role": "system", "content": full_sys_prompt}]
         
-        api_messages = [{"role": "system", "content": final_system_content}] + [
-            {"role": m["role"], "content": m["content"]} for m in current_messages
-        ]
+        # Clean current session messages for API compatibility
+        for m in messages:
+            api_messages.append({"role": m["role"], "content": m["content"]})
 
-        try:
-            stream = client.chat.completions.create(
-                model=model_option,
+        # Set Tool Choice parameter
+        tool_param = tool_choice if tool_choice in ["auto", "none"] else {"type": "function", "function": {"name": tool_choice}}
+
+        # First Call: Check for Tool Use
+        response = client.chat.completions.create(
+            model=selected_model,
+            messages=api_messages,
+            tools=tools_definition,
+            tool_choice=tool_param,
+            temperature=temperature,
+            max_tokens=max_tokens
+        )
+        
+        response_msg = response.choices[0].message
+        
+        if response_msg.tool_calls:
+            api_messages.append(response_msg)
+            for tool_call in response_msg.tool_calls:
+                func_name = tool_call.function.name
+                args = json.loads(tool_call.function.arguments)
+                
+                with st.status(f"Executing Tool: {func_name}...", expanded=False):
+                    func_res = available_functions[func_name](**args)
+                
+                api_messages.append({
+                    "tool_call_id": tool_call.id,
+                    "role": "tool",
+                    "name": func_name,
+                    "content": func_res
+                })
+            
+            # Second Call: Final Answer Generation
+            second_res = client.chat.completions.create(
+                model=selected_model, 
                 messages=api_messages,
-                #temperature=temperature,
-                stream=True
+                temperature=temperature
             )
-            
-            for chunk in stream:
-                if chunk.choices[0].delta.content is not None:
-                    full_response += chunk.choices[0].delta.content
-                    message_placeholder.markdown(full_response + "|")
-            
-            message_placeholder.markdown(full_response)
-            current_messages.append({"role": "assistant", "content": full_response})
-        except Exception as e:
-            st.error(f"錯誤: {str(e)}")
+            final_text = second_res.choices[0].message.content
+        else:
+            final_text = response_msg.content
+
+        st.markdown(f"*(Model: {selected_model})*\n\n{final_text}")
+        messages.append({"role": "assistant", "content": final_text, "model": selected_model})
+        
+        # D. Persistence
+        save_chat_history(st.session_state.chat_sessions)
+        save_memory(st.session_state.user_memories)
